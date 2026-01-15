@@ -7,7 +7,7 @@ import os
 # --------------------------------
 # Utils
 # --------------------------------
-def extract_order_id(filename):
+def extract_order_id(filename: str) -> str:
     match = re.search(r"_(\d+)_", filename)
     return match.group(1) if match else ""
 
@@ -19,19 +19,19 @@ def read_order_xlsx(uploaded_file):
         st.error(f"Errore lettura file: {e}")
         return None
 
-def find_col(row, label):
+def find_col(row, label: str):
     for i, v in enumerate(row):
         if isinstance(v, str) and v.strip() == label:
             return i
     return None
 
-def to_int(x):
+def to_int(x) -> int:
     try:
         return int(float(str(x).replace(",", ".")))
     except:
         return 0
 
-def to_money(x):
+def to_money(x) -> float:
     """
     Converte stringhe tipo:
     '55,00 €' -> 55.00
@@ -52,7 +52,7 @@ def to_money(x):
 # --------------------------------
 # Parser nuovo template Nike
 # --------------------------------
-def process_order_details(df, order_id, view_option):
+def process_order_details(df: pd.DataFrame, order_id: str, view_option: str):
     rows = []
 
     current_model = None
@@ -71,45 +71,47 @@ def process_order_details(df, order_id, view_option):
         # Nuovo articolo
         idx = find_col(row, "Modello/Colore:")
         if idx is not None:
-            current_model = str(row[idx + 1]).strip()
+            current_model = str(row[idx + 1]).strip() if idx + 1 < len(row) else ""
             model_name = color_desc = product_type = None
             whs_val = rtl_val = None
             in_table = False
-            # Nota: sulla stessa riga spesso c'è anche "All'ingrosso:"
+
+            # A volte WHS è già sulla stessa riga
             idx_whs = find_col(row, "All'ingrosso:")
-            if idx_whs is not None:
+            if idx_whs is not None and idx_whs + 1 < len(row):
                 whs_val = to_money(row[idx_whs + 1])
             continue
 
         # Metadati
         idx = find_col(row, "Nome modello:")
         if idx is not None:
-            model_name = str(row[idx + 1]).strip()
-            # spesso qui c'è "Retail consigliato:"
+            model_name = str(row[idx + 1]).strip() if idx + 1 < len(row) else ""
+
+            # A volte RTL è sulla stessa riga
             idx_rtl = find_col(row, "Retail consigliato:")
-            if idx_rtl is not None:
+            if idx_rtl is not None and idx_rtl + 1 < len(row):
                 rtl_val = to_money(row[idx_rtl + 1])
             continue
 
         idx = find_col(row, "Descrizione colore:")
         if idx is not None:
-            color_desc = str(row[idx + 1]).strip()
+            color_desc = str(row[idx + 1]).strip() if idx + 1 < len(row) else ""
             continue
 
         idx = find_col(row, "Tipo di prodotto:")
         if idx is not None:
-            product_type = str(row[idx + 1]).strip()
+            product_type = str(row[idx + 1]).strip() if idx + 1 < len(row) else ""
             continue
 
-        # Nel caso in cui WHS/RTL fossero su righe dedicate (alcuni template fanno così)
+        # Nel caso WHS/RTL fossero su righe dedicate
         idx = find_col(row, "All'ingrosso:")
         if idx is not None and current_model:
-            whs_val = to_money(row[idx + 1])
+            whs_val = to_money(row[idx + 1]) if idx + 1 < len(row) else 0.0
             continue
 
         idx = find_col(row, "Retail consigliato:")
         if idx is not None and current_model:
-            rtl_val = to_money(row[idx + 1])
+            rtl_val = to_money(row[idx + 1]) if idx + 1 < len(row) else 0.0
             continue
 
         # Header tabella taglie
@@ -131,24 +133,28 @@ def process_order_details(df, order_id, view_option):
             continue
 
         # Fine tabella
-        if isinstance(row[0], str) and row[0].startswith("Qtà totale"):
+        if isinstance(row[0], str) and str(row[0]).startswith("Qtà totale"):
             in_table = False
             continue
 
         # Riga taglia
-        size = str(row[col_size]).strip()
+        size = str(row[col_size]).strip() if col_size is not None and col_size < len(row) else ""
         if not size:
             continue
+
+        upc = str(row[col_upc]).strip() if col_upc is not None and col_upc < len(row) else ""
+        confirmed = to_int(row[col_confirmed]) if col_confirmed is not None and col_confirmed < len(row) else 0
+        shipped = to_int(row[col_shipped]) if col_shipped is not None and col_shipped < len(row) else 0
 
         rows.append([
             current_model,
             size,
-            to_int(row[col_confirmed]) if col_confirmed is not None else 0,
-            to_int(row[col_shipped]) if col_shipped is not None else 0,
-            model_name,
-            color_desc,
-            str(row[col_upc]).strip() if col_upc is not None else "",
-            product_type,
+            confirmed,
+            shipped,
+            model_name or "",
+            color_desc or "",
+            upc,
+            product_type or "",
             order_id,
             float(whs_val) if whs_val is not None else 0.0,
             float(rtl_val) if rtl_val is not None else 0.0,
@@ -173,20 +179,26 @@ def process_order_details(df, order_id, view_option):
         lambda x: str(x).split("-")[1] if "-" in str(x) else ""
     )
 
-    # Rimuove righe inutili
+    # Rimuove righe totalmente vuote (0 e 0)
     df_final = df_final[(df_final["Confermati"] != 0) | (df_final["Spediti"] != 0)]
 
+    # Filtro per vista (righe)
+    if view_option == "CONFERMATI":
+        df_final = df_final[df_final["Confermati"] > 0]
+    else:
+        df_final = df_final[df_final["Spediti"] > 0]
+
+    # Colonne base: WHS/RTL alla fine (ultime in assoluto, dopo il conteggio vista)
     base_cols = [
         "Modello/Colore", "Descrizione colore", "Codice",
         "Nome del modello", "Tipo di prodotto",
-        "WHS", "RTL",
         "Colore", "Misura", "Codice a Barre (UPC)", "ID_ORDINE"
     ]
 
     if view_option == "CONFERMATI":
-        df_final = df_final[base_cols + ["Confermati"]]
+        df_final = df_final[base_cols + ["Confermati", "WHS", "RTL"]]
     else:
-        df_final = df_final[base_cols + ["Spediti"]]
+        df_final = df_final[base_cols + ["Spediti", "WHS", "RTL"]]
 
     # Export Excel
     output = BytesIO()
