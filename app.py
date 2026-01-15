@@ -215,7 +215,7 @@ def process_order_details(df: pd.DataFrame, order_id: str, view_option: str):
 # --------------------------------
 # UI Streamlit
 # --------------------------------
-st.title("Nike order details")
+st.title("Nike order details v2")
 
 uploaded_file = st.file_uploader(
     "Carica il file XLSX (Order Details)",
