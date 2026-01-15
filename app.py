@@ -62,7 +62,8 @@ def process_order_details(df: pd.DataFrame, order_id: str, view_option: str):
     whs_val = None
     rtl_val = None
 
-    col_size = col_upc = col_confirmed = col_shipped = None
+    col_size = col_upc = None
+    col_richiesti = col_aperti = col_spediti = None
     in_table = False
 
     for _, r in df.iterrows():
@@ -119,14 +120,17 @@ def process_order_details(df: pd.DataFrame, order_id: str, view_option: str):
             in_table = True
             col_size = 0
             col_upc = 1
-            col_confirmed = col_shipped = None
+            col_richiesti = col_aperti = col_spediti = None
 
             for i, v in enumerate(row):
                 if isinstance(v, str):
-                    if v.strip() == "Aperti:":
-                        col_confirmed = i
-                    if v.strip() == "Spediti:":
-                        col_shipped = i
+                    label = v.strip()
+                    if label == "Richiesti:":
+                        col_richiesti = i
+                    if label == "Aperti:":
+                        col_aperti = i
+                    if label == "Spediti:":
+                        col_spediti = i
             continue
 
         if not in_table or not current_model:
@@ -143,14 +147,17 @@ def process_order_details(df: pd.DataFrame, order_id: str, view_option: str):
             continue
 
         upc = str(row[col_upc]).strip() if col_upc is not None and col_upc < len(row) else ""
-        confirmed = to_int(row[col_confirmed]) if col_confirmed is not None and col_confirmed < len(row) else 0
-        shipped = to_int(row[col_shipped]) if col_shipped is not None and col_shipped < len(row) else 0
+
+        richiesti = to_int(row[col_richiesti]) if col_richiesti is not None and col_richiesti < len(row) else 0
+        aperti = to_int(row[col_aperti]) if col_aperti is not None and col_aperti < len(row) else 0
+        spediti = to_int(row[col_spediti]) if col_spediti is not None and col_spediti < len(row) else 0
 
         rows.append([
             current_model,
             size,
-            confirmed,
-            shipped,
+            richiesti,
+            aperti,
+            spediti,
             model_name or "",
             color_desc or "",
             upc,
@@ -163,7 +170,7 @@ def process_order_details(df: pd.DataFrame, order_id: str, view_option: str):
     df_final = pd.DataFrame(
         rows,
         columns=[
-            "Modello/Colore", "Misura", "Confermati", "Spediti",
+            "Modello/Colore", "Misura", "Richiesti", "Aperti", "Spediti",
             "Nome del modello", "Descrizione colore",
             "Codice a Barre (UPC)", "Tipo di prodotto", "ID_ORDINE",
             "WHS", "RTL"
@@ -179,26 +186,24 @@ def process_order_details(df: pd.DataFrame, order_id: str, view_option: str):
         lambda x: str(x).split("-")[1] if "-" in str(x) else ""
     )
 
-    # Rimuove righe totalmente vuote (0 e 0)
-    df_final = df_final[(df_final["Confermati"] != 0) | (df_final["Spediti"] != 0)]
+    # Rimuove righe completamente vuote su tutte e tre
+    df_final = df_final[
+        (df_final["Richiesti"] != 0) | (df_final["Aperti"] != 0) | (df_final["Spediti"] != 0)
+    ]
 
-    # Filtro per vista (righe)
-    if view_option == "CONFERMATI":
-        df_final = df_final[df_final["Confermati"] > 0]
-    else:
-        df_final = df_final[df_final["Spediti"] > 0]
+    # Filtro per vista richiesta dall'utente
+    qty_col = view_option  # "Richiesti" | "Aperti" | "Spediti"
+    df_final = df_final[df_final[qty_col] > 0]
 
-    # Colonne base: WHS/RTL alla fine (ultime in assoluto, dopo il conteggio vista)
+    # Colonne base (WHS/RTL sempre in fondo, ultime in assoluto)
     base_cols = [
         "Modello/Colore", "Descrizione colore", "Codice",
         "Nome del modello", "Tipo di prodotto",
-        "Colore", "Misura", "Codice a Barre (UPC)", "ID_ORDINE"
+        "Colore", "Misura", "Codice a Barre (UPC)", "ID_ORDINE",
+        qty_col, "WHS", "RTL"
     ]
 
-    if view_option == "CONFERMATI":
-        df_final = df_final[base_cols + ["Confermati", "WHS", "RTL"]]
-    else:
-        df_final = df_final[base_cols + ["Spediti", "WHS", "RTL"]]
+    df_final = df_final[base_cols]
 
     # Export Excel
     output = BytesIO()
@@ -221,10 +226,19 @@ if uploaded_file:
     filename = os.path.splitext(uploaded_file.name)[0]
     order_id = st.text_input("ID_ORDINE", extract_order_id(filename))
 
-    view_option = st.radio(
+    # Radio con le tre viste richieste
+    view_option_ui = st.radio(
         "Seleziona vista",
-        ("CONFERMATI", "SPEDITI")
+        ("RICHIESTI", "APERTI", "SPEDITI")
     )
+
+    # Mappa UI -> nome colonna df
+    view_map = {
+        "RICHIESTI": "Richiesti",
+        "APERTI": "Aperti",
+        "SPEDITI": "Spediti"
+    }
+    view_option = view_map[view_option_ui]
 
     df = read_order_xlsx(uploaded_file)
 
