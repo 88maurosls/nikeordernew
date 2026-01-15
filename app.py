@@ -229,7 +229,8 @@ if uploaded_file:
     # Radio con le tre viste richieste
     view_option_ui = st.radio(
         "Seleziona vista",
-        ("RICHIESTI", "APERTI", "SPEDITI")
+        ("RICHIESTI", "APERTI", "SPEDITI"),
+        index=1
     )
 
     # Mappa UI -> nome colonna df
