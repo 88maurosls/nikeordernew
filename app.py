@@ -25,6 +25,30 @@ def find_col(row, label):
             return i
     return None
 
+def to_int(x):
+    try:
+        return int(float(str(x).replace(",", ".")))
+    except:
+        return 0
+
+def to_money(x):
+    """
+    Converte stringhe tipo:
+    '55,00 €' -> 55.00
+    '1.770,00 €' -> 1770.00
+    Se non parsabile -> 0.0
+    """
+    try:
+        s = str(x)
+        s = s.replace("\xa0", " ").strip()
+        s = s.replace("€", "").strip()
+        s = s.replace(".", "")          # separatore migliaia
+        s = s.replace(",", ".")         # decimali
+        s = re.sub(r"\s+", "", s)
+        return float(s) if s else 0.0
+    except:
+        return 0.0
+
 # --------------------------------
 # Parser nuovo template Nike
 # --------------------------------
@@ -35,6 +59,8 @@ def process_order_details(df, order_id, view_option):
     model_name = None
     color_desc = None
     product_type = None
+    whs_val = None
+    rtl_val = None
 
     col_size = col_upc = col_confirmed = col_shipped = None
     in_table = False
@@ -47,13 +73,22 @@ def process_order_details(df, order_id, view_option):
         if idx is not None:
             current_model = str(row[idx + 1]).strip()
             model_name = color_desc = product_type = None
+            whs_val = rtl_val = None
             in_table = False
+            # Nota: sulla stessa riga spesso c'è anche "All'ingrosso:"
+            idx_whs = find_col(row, "All'ingrosso:")
+            if idx_whs is not None:
+                whs_val = to_money(row[idx_whs + 1])
             continue
 
         # Metadati
         idx = find_col(row, "Nome modello:")
         if idx is not None:
             model_name = str(row[idx + 1]).strip()
+            # spesso qui c'è "Retail consigliato:"
+            idx_rtl = find_col(row, "Retail consigliato:")
+            if idx_rtl is not None:
+                rtl_val = to_money(row[idx_rtl + 1])
             continue
 
         idx = find_col(row, "Descrizione colore:")
@@ -64,6 +99,17 @@ def process_order_details(df, order_id, view_option):
         idx = find_col(row, "Tipo di prodotto:")
         if idx is not None:
             product_type = str(row[idx + 1]).strip()
+            continue
+
+        # Nel caso in cui WHS/RTL fossero su righe dedicate (alcuni template fanno così)
+        idx = find_col(row, "All'ingrosso:")
+        if idx is not None and current_model:
+            whs_val = to_money(row[idx + 1])
+            continue
+
+        idx = find_col(row, "Retail consigliato:")
+        if idx is not None and current_model:
+            rtl_val = to_money(row[idx + 1])
             continue
 
         # Header tabella taglie
@@ -94,22 +140,18 @@ def process_order_details(df, order_id, view_option):
         if not size:
             continue
 
-        def to_int(x):
-            try:
-                return int(float(str(x).replace(",", ".")))
-            except:
-                return 0
-
         rows.append([
             current_model,
             size,
-            to_int(row[col_confirmed]),
-            to_int(row[col_shipped]),
+            to_int(row[col_confirmed]) if col_confirmed is not None else 0,
+            to_int(row[col_shipped]) if col_shipped is not None else 0,
             model_name,
             color_desc,
-            str(row[col_upc]).strip(),
+            str(row[col_upc]).strip() if col_upc is not None else "",
             product_type,
-            order_id
+            order_id,
+            float(whs_val) if whs_val is not None else 0.0,
+            float(rtl_val) if rtl_val is not None else 0.0,
         ])
 
     df_final = pd.DataFrame(
@@ -117,7 +159,8 @@ def process_order_details(df, order_id, view_option):
         columns=[
             "Modello/Colore", "Misura", "Confermati", "Spediti",
             "Nome del modello", "Descrizione colore",
-            "Codice a Barre (UPC)", "Tipo di prodotto", "ID_ORDINE"
+            "Codice a Barre (UPC)", "Tipo di prodotto", "ID_ORDINE",
+            "WHS", "RTL"
         ]
     )
 
@@ -125,9 +168,9 @@ def process_order_details(df, order_id, view_option):
         return None, df_final
 
     # Codice e Colore
-    df_final["Codice"] = df_final["Modello/Colore"].apply(lambda x: x.split("-")[0])
+    df_final["Codice"] = df_final["Modello/Colore"].apply(lambda x: str(x).split("-")[0])
     df_final["Colore"] = df_final["Modello/Colore"].apply(
-        lambda x: x.split("-")[1] if "-" in x else ""
+        lambda x: str(x).split("-")[1] if "-" in str(x) else ""
     )
 
     # Rimuove righe inutili
@@ -136,6 +179,7 @@ def process_order_details(df, order_id, view_option):
     base_cols = [
         "Modello/Colore", "Descrizione colore", "Codice",
         "Nome del modello", "Tipo di prodotto",
+        "WHS", "RTL",
         "Colore", "Misura", "Codice a Barre (UPC)", "ID_ORDINE"
     ]
 
