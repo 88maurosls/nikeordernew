@@ -3,257 +3,191 @@ import pandas as pd
 from io import BytesIO
 import re
 import os
+from numbers import Real
 
-# --------------------------------
-# Utils
-# --------------------------------
-def extract_order_id(filename: str) -> str:
-    match = re.search(r"_(\d+)_", filename)
-    return match.group(1) if match else ""
+
+def normalize(value):
+    return re.sub(r'\s+', ' ', str(value).strip()).rstrip(':').strip().casefold()
+
+
+def find_col(row, *labels):
+    wanted = {normalize(label) for label in labels}
+    return next((i for i, v in enumerate(row) if normalize(v) in wanted), None)
+
+
+def cell(row, index):
+    return row[index] if index is not None and 0 <= index < len(row) else ''
+
+
+def text_value(value):
+    if isinstance(value, Real) and float(value).is_integer():
+        return str(int(value))
+    return str(value).strip()
+
+
+def extract_order_id(filename):
+    match = re.search(r'_(\d+)_', filename)
+    return match.group(1) if match else ''
+
+
+def extract_order_id_from_df(df):
+    for row in df.itertuples(index=False, name=None):
+        idx = find_col(row, 'Numero ordine:')
+        if idx is not None:
+            value = text_value(cell(row, idx + 1))
+            if value:
+                return value
+    return ''
+
 
 def read_order_xlsx(uploaded_file):
     try:
-        df = pd.read_excel(uploaded_file, sheet_name=0, header=None, dtype=object)
-        return df.fillna("")
+        uploaded_file.seek(0)
+        return pd.read_excel(uploaded_file, sheet_name=0, header=None, dtype=object).fillna('')
     except Exception as e:
-        st.error(f"Errore lettura file: {e}")
+        st.error(f'Errore lettura file: {e}')
         return None
 
-def find_col(row, label: str):
-    for i, v in enumerate(row):
-        if isinstance(v, str) and v.strip() == label:
-            return i
-    return None
 
-def to_int(x) -> int:
+def to_money(value):
+    if isinstance(value, Real):
+        return float(value)
+    s = re.sub(r'\s+', '', str(value).replace('€', ''))
+    if ',' in s:
+        if '.' in s and s.rfind('.') > s.rfind(','):
+            s = s.replace(',', '')
+        else:
+            s = s.replace('.', '').replace(',', '.')
+    elif re.fullmatch(r'[-+]?\d{1,3}(\.\d{3})+', s):
+        s = s.replace('.', '')
     try:
-        return int(float(str(x).replace(",", ".")))
-    except:
-        return 0
-
-def to_money(x) -> float:
-    """
-    Converte stringhe tipo:
-    '55,00 €' -> 55.00
-    '1.770,00 €' -> 1770.00
-    Se non parsabile -> 0.0
-    """
-    try:
-        s = str(x)
-        s = s.replace("\xa0", " ").strip()
-        s = s.replace("€", "").strip()
-        s = s.replace(".", "")          # separatore migliaia
-        s = s.replace(",", ".")         # decimali
-        s = re.sub(r"\s+", "", s)
-        return float(s) if s else 0.0
-    except:
+        return float(s)
+    except (ValueError, TypeError):
         return 0.0
 
-# --------------------------------
-# Parser nuovo template Nike
-# --------------------------------
-def process_order_details(df: pd.DataFrame, order_id: str, view_option: str):
+
+def to_int(value):
+    try:
+        return int(to_money(value))
+    except (ValueError, OverflowError):
+        return 0
+
+
+def process_order_details(df, order_id, view_option):
     rows = []
-
-    current_model = None
-    model_name = None
-    color_desc = None
-    product_type = None
-    whs_val = None
-    rtl_val = None
-
-    col_size = col_upc = None
-    col_richiesti = col_aperti = col_spediti = None
+    current_model = ''
+    meta = {}
+    columns = {}
     in_table = False
+    qty_names = ('Richiesti', 'Aperti', 'Spediti')
 
-    for _, r in df.iterrows():
-        row = r.tolist()
-
-        # Nuovo articolo
-        idx = find_col(row, "Modello/Colore:")
+    for row in df.itertuples(index=False, name=None):
+        idx = find_col(row, 'Modello/Colore:')
         if idx is not None:
-            current_model = str(row[idx + 1]).strip() if idx + 1 < len(row) else ""
-            model_name = color_desc = product_type = None
-            whs_val = rtl_val = None
+            current_model = text_value(cell(row, idx + 1))
+            meta = {'Nome del modello': '', 'Descrizione colore': '',
+                    'Tipo di prodotto': '', 'WHS': 0.0, 'RTL': 0.0}
             in_table = False
+            columns = {}
 
-            # A volte WHS è già sulla stessa riga
-            idx_whs = find_col(row, "All'ingrosso:")
-            if idx_whs is not None and idx_whs + 1 < len(row):
-                whs_val = to_money(row[idx_whs + 1])
+        if not current_model:
             continue
 
-        # Metadati
-        idx = find_col(row, "Nome modello:")
+        # Legge tutti i metadati, anche se presenti sulla stessa riga.
+        for key, labels in {
+            'Nome del modello': ('Nome modello:', 'Nome prodotto:'),
+            'Descrizione colore': ('Descrizione colore:',),
+            'Tipo di prodotto': ('Tipo di prodotto:',),
+            'WHS': ("All'ingrosso:",),
+            'RTL': ('Retail consigliato:',),
+        }.items():
+            pos = find_col(row, *labels)
+            if pos is not None:
+                value = cell(row, pos + 1)
+                meta[key] = to_money(value) if key in ('WHS', 'RTL') else text_value(value)
+
         if idx is not None:
-            model_name = str(row[idx + 1]).strip() if idx + 1 < len(row) else ""
-
-            # A volte RTL è sulla stessa riga
-            idx_rtl = find_col(row, "Retail consigliato:")
-            if idx_rtl is not None and idx_rtl + 1 < len(row):
-                rtl_val = to_money(row[idx_rtl + 1])
             continue
 
-        idx = find_col(row, "Descrizione colore:")
-        if idx is not None:
-            color_desc = str(row[idx + 1]).strip() if idx + 1 < len(row) else ""
+        size_col = find_col(row, 'Misura', 'Taglia/misura', 'Taglia')
+        if size_col is not None:
+            upc_col = find_col(row, 'UPC', 'Codice a Barre (UPC)')
+            columns = {'Misura': size_col, 'UPC': upc_col if upc_col is not None else size_col + 1}
+            columns.update({name: find_col(row, name) for name in qty_names})
+            in_table = all(columns[name] is not None for name in qty_names)
             continue
 
-        idx = find_col(row, "Tipo di prodotto:")
-        if idx is not None:
-            product_type = str(row[idx + 1]).strip() if idx + 1 < len(row) else ""
+        if not in_table:
             continue
 
-        # Nel caso WHS/RTL fossero su righe dedicate
-        idx = find_col(row, "All'ingrosso:")
-        if idx is not None and current_model:
-            whs_val = to_money(row[idx + 1]) if idx + 1 < len(row) else 0.0
-            continue
-
-        idx = find_col(row, "Retail consigliato:")
-        if idx is not None and current_model:
-            rtl_val = to_money(row[idx + 1]) if idx + 1 < len(row) else 0.0
-            continue
-
-        # Header tabella taglie
-        if isinstance(row[0], str) and row[0].strip() == "Misura":
-            in_table = True
-            col_size = 0
-            col_upc = 1
-            col_richiesti = col_aperti = col_spediti = None
-
-            for i, v in enumerate(row):
-                if isinstance(v, str):
-                    label = v.strip()
-                    if label == "Richiesti:":
-                        col_richiesti = i
-                    if label == "Aperti:":
-                        col_aperti = i
-                    if label == "Spediti:":
-                        col_spediti = i
-            continue
-
-        if not in_table or not current_model:
-            continue
-
-        # Fine tabella
-        if isinstance(row[0], str) and str(row[0]).startswith("Qtà totale"):
+        size = text_value(cell(row, columns['Misura']))
+        if normalize(size).startswith(('qtà totale', 'quantità totale', 'totale quantità')):
             in_table = False
             continue
-
-        # Riga taglia
-        size = str(row[col_size]).strip() if col_size is not None and col_size < len(row) else ""
-        if not size:
+        upc = text_value(cell(row, columns['UPC']))
+        if not size or not upc:
             continue
 
-        upc = str(row[col_upc]).strip() if col_upc is not None and col_upc < len(row) else ""
+        code, _, color = current_model.partition('-')
+        record = {
+            'Modello/Colore': current_model,
+            'Codice': code, 'Colore': color, 'Misura': size,
+            'Codice a Barre (UPC)': upc, 'ID_ORDINE': str(order_id),
+            **meta,
+        }
+        record.update({name: to_int(cell(row, columns[name])) for name in qty_names})
+        rows.append(record)
 
-        richiesti = to_int(row[col_richiesti]) if col_richiesti is not None and col_richiesti < len(row) else 0
-        aperti = to_int(row[col_aperti]) if col_aperti is not None and col_aperti < len(row) else 0
-        spediti = to_int(row[col_spediti]) if col_spediti is not None and col_spediti < len(row) else 0
-
-        rows.append([
-            current_model,
-            size,
-            richiesti,
-            aperti,
-            spediti,
-            model_name or "",
-            color_desc or "",
-            upc,
-            product_type or "",
-            order_id,
-            float(whs_val) if whs_val is not None else 0.0,
-            float(rtl_val) if rtl_val is not None else 0.0,
-        ])
-
-    df_final = pd.DataFrame(
-        rows,
-        columns=[
-            "Modello/Colore", "Misura", "Richiesti", "Aperti", "Spediti",
-            "Nome del modello", "Descrizione colore",
-            "Codice a Barre (UPC)", "Tipo di prodotto", "ID_ORDINE",
-            "WHS", "RTL"
-        ]
-    )
-
-    if df_final.empty:
-        return None, df_final
-
-    # Codice e Colore
-    df_final["Codice"] = df_final["Modello/Colore"].apply(lambda x: str(x).split("-")[0])
-    df_final["Colore"] = df_final["Modello/Colore"].apply(
-        lambda x: str(x).split("-")[1] if "-" in str(x) else ""
-    )
-
-    # Rimuove righe completamente vuote su tutte e tre
-    df_final = df_final[
-        (df_final["Richiesti"] != 0) | (df_final["Aperti"] != 0) | (df_final["Spediti"] != 0)
-    ]
-
-    # Filtro per vista richiesta dall'utente
-    qty_col = view_option  # "Richiesti" | "Aperti" | "Spediti"
-    df_final = df_final[df_final[qty_col] > 0]
-
-    # Colonne base (WHS/RTL sempre in fondo, ultime in assoluto)
     base_cols = [
-        "Modello/Colore", "Descrizione colore", "Codice",
-        "Nome del modello", "Tipo di prodotto",
-        "Colore", "Misura", "Codice a Barre (UPC)", "ID_ORDINE",
-        qty_col, "WHS", "RTL"
+        'Modello/Colore', 'Descrizione colore', 'Codice',
+        'Nome del modello', 'Tipo di prodotto', 'Colore', 'Misura',
+        'Codice a Barre (UPC)', 'ID_ORDINE', view_option, 'WHS', 'RTL'
     ]
+    if not rows:
+        return None, pd.DataFrame(columns=base_cols)
 
-    df_final = df_final[base_cols]
-
-    # Export Excel
+    result = pd.DataFrame(rows)
+    result = result.loc[result[view_option] > 0, base_cols].reset_index(drop=True)
     output = BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        df_final.to_excel(writer, index=False)
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        result.to_excel(writer, index=False)
+        ws = writer.sheets['Sheet1']
+        for name in ('Codice', 'Colore', 'Misura', 'Codice a Barre (UPC)', 'ID_ORDINE'):
+            for c in list(ws.columns)[result.columns.get_loc(name)][1:]:
+                c.number_format = '@'
+        for name in ('WHS', 'RTL'):
+            for c in list(ws.columns)[result.columns.get_loc(name)][1:]:
+                c.number_format = '0.00'
+    return output.getvalue(), result
 
-    return output.getvalue(), df_final
 
-# --------------------------------
-# UI Streamlit
-# --------------------------------
-st.title("Nike order details v2")
-
-uploaded_file = st.file_uploader(
-    "Carica il file XLSX (Order Details)",
-    type="xlsx"
-)
-
-if uploaded_file:
+def main():
+    st.title('Nike order details v3')
+    uploaded_file = st.file_uploader('Carica il file XLSX (Order Details)', type='xlsx')
+    if uploaded_file is None:
+        return
     filename = os.path.splitext(uploaded_file.name)[0]
-    order_id = st.text_input("ID_ORDINE", extract_order_id(filename))
-
-    # Radio con le tre viste richieste
-    view_option_ui = st.radio(
-        "Seleziona vista",
-        ("RICHIESTI", "APERTI", "SPEDITI"),
-        index=1
-    )
-
-    # Mappa UI -> nome colonna df
-    view_map = {
-        "RICHIESTI": "Richiesti",
-        "APERTI": "Aperti",
-        "SPEDITI": "Spediti"
-    }
-    view_option = view_map[view_option_ui]
-
     df = read_order_xlsx(uploaded_file)
-
-    if df is not None and st.button("Elabora"):
+    if df is None:
+        return
+    auto_id = extract_order_id_from_df(df) or extract_order_id(filename)
+    order_id = st.text_input('ID_ORDINE', value=auto_id, key=f'order_id_{uploaded_file.file_id}')
+    view_option = st.radio('Seleziona vista', ('RICHIESTI', 'APERTI', 'SPEDITI'), index=1).capitalize()
+    if st.button('Elabora'):
         file_out, preview = process_order_details(df, order_id, view_option)
-
+        st.session_state['nike_result'] = (uploaded_file.file_id, order_id, view_option, file_out, preview)
+    saved = st.session_state.get('nike_result')
+    if saved and saved[:3] == (uploaded_file.file_id, order_id, view_option):
+        _, _, _, file_out, preview = saved
         if file_out is None:
-            st.warning("Nessun dato trovato")
+            st.error('Nessun articolo riconosciuto. Verifica il formato del file Nike.')
+        elif preview.empty:
+            st.warning(f'Nessuna quantità presente nella vista {view_option.upper()}.')
         else:
+            st.success(f"{preview['Modello/Colore'].nunique()} articoli | {len(preview)} righe | {int(preview[view_option].sum())} pezzi")
             st.dataframe(preview, use_container_width=True)
+            st.download_button('Scarica Excel', data=file_out, file_name=f'{filename}_processed.xlsx', mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
 
-            st.download_button(
-                "Scarica Excel",
-                data=file_out,
-                file_name=f"{filename}_processed.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
+
+if __name__ == '__main__':
+    main()
